@@ -1,10 +1,6 @@
-"""test_bits.py — coverage-style tests for bits.py.
-
-Run with either:
-    python -m unittest test_bits.py -v
-    pytest test_bits.py -v
+"""test.py 
+coverage-style tests for bite.
 """
-from __future__ import annotations
 
 import unittest
 
