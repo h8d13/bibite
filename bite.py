@@ -1,4 +1,5 @@
-"""bits.py — a small, all-round toolkit for raw bit/byte manipulation.
+"""bite
+ a small, all-round toolkit for raw bit/byte manipulation.
 
 Convention: bit 0 is the most significant bit. Bits are packed MSB-first within
 each byte (network order). Endianness, where it appears, refers to byte order
@@ -7,7 +8,6 @@ in int<->Bits conversions, not bit order within bytes.
 Bits is also a read/write stream: `write(value, nbits)` appends, while
 `read(n)` consumes from an internal cursor (`pos`).
 """
-from __future__ import annotations
 
 from typing import Iterable, Iterator, Literal, Union, overload
 
