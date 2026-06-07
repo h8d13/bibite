@@ -21,10 +21,9 @@ fields are not byte-aligned.
 With raw bytes you would hand-write shifts and masks (byte0 = (version << 4) | ihl,
 flags = (word >> 13) & 0x7, ...). With Bits you write the fields in order at
 their declared widths, and decoding is the mirror image.
-"""
-import os, sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+Run from the repo root: python -m examples.ipv4
+"""
 from dataclasses import dataclass
 
 from bite import Bits

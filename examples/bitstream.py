@@ -6,10 +6,9 @@ When fields are narrower than a byte (a 3-bit type tag, a 1-bit flag, a 12-bit
 id), storing each in its own byte wastes most of the space. write/read move
 fields at their exact widths so they sit shoulder to shoulder with no padding
 between them. pad_to_byte aligns only the final tail, once.
-"""
-import os, sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+Run from the repo root: python -m examples.bitstream
+"""
 from bite import Bits
 
 # (value, width) records with mixed sub-byte widths.

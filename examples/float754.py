@@ -11,10 +11,9 @@ A 32-bit float is three packed fields, MSB-first:
 struct.pack(">f", x) gives the 4 raw big-endian bytes. Wrapping them in Bits
 lets us slice the three fields out by position and read each as an int, instead
 of juggling shifts and masks against a 32-bit word.
-"""
-import os, sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+Run from the repo root: python -m examples.float754
+"""
 import math
 import struct
 
