@@ -7,6 +7,11 @@ in int<->Bits conversions, not bit order within bytes.
 
 Bits is also a read/write stream: `write(value, nbits)` appends, while
 `read(n)` consumes from an internal cursor (`pos`).
+
+Invariant: unused tail bits of the final storage byte are always zero. Every
+constructor and operation that can leave a partial last byte masks it, so two
+value-equal Bits always compare `==` and hash equal regardless of how they were
+built (int, from_bits, append, bytes+nbits, ...).
 """
 
 from typing import Iterable, Iterator, Literal, Union, overload
@@ -22,6 +27,7 @@ class Bits:
         Bits()                        # empty
         Bits(b"\\xab\\xcd")           # from bytes
         Bits(0xABC, nbits=12)         # from int, left-aligned in storage
+        Bits(0xFF, nbits=4)           # from int, keeps low 4 bits -> 0b1111
         Bits("0b10101010")            # from binary literal
         Bits("0xdeadbeef")            # from hex literal
         Bits.from_bits([1, 0, 1, 1])  # from iterable of 0/1
@@ -43,23 +49,36 @@ class Bits:
         if isinstance(source, Bits):
             self._data = bytearray(source._data)
             self._nbits = source._nbits if nbits is None else nbits
+            self._normalize()  # nbits override may shrink or overrun length
             return
         if isinstance(source, bool):  # bool is int — guard before int branch
             source = int(source)
         if isinstance(source, int):
+            if nbits is None and source < 0:
+                raise ValueError("negative int needs an explicit nbits")
             n = nbits if nbits is not None else max(source.bit_length(), 1)
+            source &= (1 << n) - 1  # keep low n bits; truncates, never overflows
             self._data = bytearray((source << ((-n) % 8)).to_bytes((n + 7) // 8, "big"))
             self._nbits = n
             return
         if isinstance(source, str):
             self._data, self._nbits = self._parse_str(source, nbits)
+            self._normalize()
             return
         # bytes-like or iterable of byte values
         self._data = bytearray(source)
         self._nbits = nbits if nbits is not None else len(self._data) * 8
+        self._normalize()  # explicit nbits may shrink, overrun, or leave a partial byte
 
     @staticmethod
     def _parse_str(s: str, nbits: int | None) -> tuple[bytearray, int]:
+        """Parse a "0b...", "0x...", or bare literal into (data, nbits).
+
+        Disambiguation for bare strings (no prefix): a string of only 0/1 digits
+        is read as BINARY when `nbits` is given or its length is odd; otherwise
+        (even length, no nbits) it is read as HEX. So bare "0011" is hex 0x0011
+        (16 bits); use the "0b" prefix or pass nbits to force binary.
+        """
         s = s.strip().replace("_", "").replace(" ", "").lower()
         if s.startswith("0b"):
             s = s[2:]
@@ -86,8 +105,7 @@ class Bits:
     @classmethod
     def from_bits(cls, bits: Iterable[int]) -> "Bits":
         out = cls()
-        for b in bits:
-            out.append(b)
+        out.extend(bits)
         return out
 
     @classmethod
@@ -101,9 +119,7 @@ class Bits:
 
     @classmethod
     def ones(cls, nbits: int) -> "Bits":
-        b = cls(b"\xff" * ((nbits + 7) // 8), nbits=nbits)
-        b._mask_tail()
-        return b
+        return cls(b"\xff" * ((nbits + 7) // 8), nbits=nbits)
 
     # ---- internals -----------------------------------------------------
 
@@ -113,6 +129,17 @@ class Bits:
         if not 0 <= i < self._nbits:
             raise IndexError(i)
         return i >> 3, 7 - (i & 7)
+
+    def _normalize(self) -> None:
+        """Reconcile storage with `_nbits`: reject over-short data, drop excess
+        trailing bytes, zero the tail. Keeps the tail-zero / exact-byte-count
+        invariant after any nbits override."""
+        if self._nbits > len(self._data) * 8:
+            raise ValueError(f"nbits {self._nbits} exceeds data ({len(self._data) * 8} bits)")
+        need = (self._nbits + 7) // 8
+        if len(self._data) > need:
+            del self._data[need:]
+        self._mask_tail()
 
     def _mask_tail(self) -> None:
         tail = (-self._nbits) % 8
@@ -170,8 +197,7 @@ class Bits:
 
     def read(self, n: int) -> int:
         """Consume n bits from the cursor and return them as an unsigned int."""
-        if self.pos + n > self._nbits:
-            raise EOFError(f"requested {n} bits, only {self._nbits - self.pos} remain")
+        self._check_read(n)
         v = 0
         for _ in range(n):
             v = (v << 1) | self[self.pos]
@@ -179,12 +205,21 @@ class Bits:
         return v
 
     def read_bits(self, n: int) -> "Bits":
+        self._check_read(n)
         out = self[self.pos : self.pos + n]
         self.pos += n
         return out
 
     def read_bytes(self, n: int) -> bytes:
+        if n < 0:
+            raise ValueError(f"read count must be non-negative, got {n}")
         return bytes(self.read_bits(n * 8))
+
+    def _check_read(self, n: int) -> None:
+        if n < 0:
+            raise ValueError(f"read count must be non-negative, got {n}")
+        if self.pos + n > self._nbits:
+            raise EOFError(f"requested {n} bits, only {self.remaining()} remain")
 
     def chunks(self, n: int) -> Iterator[int]:
         """Yield successive `n`-bit ints from the cursor; stop when fewer than `n` bits remain."""
@@ -192,9 +227,11 @@ class Bits:
             yield self.read(n)
 
     def skip(self, n: int) -> None:
-        self.pos += n
+        self.seek(self.pos + n)
 
     def seek(self, pos: int) -> None:
+        if not 0 <= pos <= self._nbits:
+            raise ValueError(f"seek out of range: {pos} not in [0, {self._nbits}]")
         self.pos = pos
 
     def rewind(self) -> None:
@@ -211,6 +248,8 @@ class Bits:
         v = int.from_bytes(self._data, "big") >> ((-self._nbits) % 8)
         if endian == "big":
             return v
+        if self._nbits % 8:
+            raise ValueError("little-endian to_int requires byte-aligned length")
         nbytes = (self._nbits + 7) // 8
         return int.from_bytes(v.to_bytes(nbytes, "big"), "little")
 
@@ -230,18 +269,14 @@ class Bits:
             other = Bits(other)
         if self._nbits != other._nbits:
             raise ValueError(f"length mismatch: {self._nbits} vs {other._nbits}")
-        out = Bits(bytes(op(a, b) for a, b in zip(self._data, other._data)), nbits=self._nbits)
-        out._mask_tail()
-        return out
+        return Bits(bytes(op(a, b) for a, b in zip(self._data, other._data)), nbits=self._nbits)
 
     def __and__(self, o: "Bits") -> "Bits": return self._binop(o, lambda a, b: a & b)
     def __or__(self, o: "Bits") -> "Bits":  return self._binop(o, lambda a, b: a | b)
     def __xor__(self, o: "Bits") -> "Bits": return self._binop(o, lambda a, b: a ^ b)
 
     def __invert__(self) -> "Bits":
-        out = Bits(bytes(~b & 0xFF for b in self._data), nbits=self._nbits)
-        out._mask_tail()
-        return out
+        return Bits(bytes(~b & 0xFF for b in self._data), nbits=self._nbits)
 
     def __lshift__(self, n: int) -> "Bits":
         if n <= 0:           return Bits(self)
@@ -263,9 +298,6 @@ class Bits:
 
     def count(self, bit: int = 1) -> int:
         ones = sum(b.bit_count() for b in self._data)
-        tail = (-self._nbits) % 8
-        if tail and self._data:
-            ones -= (self._data[-1] & ((1 << tail) - 1)).bit_count()
         return ones if bit else self._nbits - ones
 
     def reversed_bits(self) -> "Bits":
@@ -287,7 +319,7 @@ class Bits:
 
     def __eq__(self, o: object) -> bool:
         if not isinstance(o, Bits): return NotImplemented
-        return self._nbits == o._nbits and bytes(self._data) == bytes(o._data)
+        return self._nbits == o._nbits and self._data == o._data
 
     def __hash__(self) -> int:
         return hash((bytes(self._data), self._nbits))
